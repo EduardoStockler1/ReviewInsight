@@ -1,8 +1,8 @@
+from scrapping.googleMapsScrapping.scrapper import main as google_maps
 from processing import dataCleaner
-from scrapping import googleMapsScrapping
 
 def main () -> None:
+    google_maps().main()
     dataCleaner.main()
-    googleMapsScrapping.main()
     
         
