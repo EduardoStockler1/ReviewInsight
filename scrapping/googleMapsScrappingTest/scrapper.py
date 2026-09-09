@@ -13,9 +13,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 from openpyxl import Workbook
 
 
-# URL da página de avaliações que será raspada. Ficou como constante do
-# módulo (em vez de uma variável solta dentro do main) porque é uma
-# configuração do script, não um passo do processamento.
+# Limite de avaliações a coletar (None = sem limite, coleta tudo)
+MAX_REVIEWS = 5
+
+# URL da página de avaliações a raspar
 REVIEWS_URL = (
     'https://www.google.com/maps/place/Hospital+Erastinho/'
     '@-25.452814,-49.2411939,1074m/data=!3m1!1e3!4m8!3m7!1s0x94dce5124cb3e99b:'
@@ -24,67 +25,70 @@ REVIEWS_URL = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Utilitários gerais
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 1) UTILITÁRIOS GERAIS (usados por várias etapas abaixo)
+# =============================================================================
 
 def safe_text(text):
-    """Garante que o texto seja codificado corretamente para uso no FPDF."""
+    """Remove caracteres que o FPDF não sabe codificar."""
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 
 def _real_click(driver, element):
     """
-    Clica em um elemento simulando uma interação real de mouse (mousedown +
-    mouseup + click), usando ActionChains.
+    Clique "de verdade" (rola até o elemento + simula mouse com ActionChains).
 
-    IMPORTANTE: isso resolve um problema comum com Selenium em páginas como o
-    Google Maps. Um clique feito via
-        driver.execute_script("arguments[0].click();", element)
-    dispara APENAS o evento "click" em JavaScript. Só que o Google Maps abre
-    seus menus a partir de eventos de "mousedown"/"pointerdown", não do
-    "click" puro. Resultado: o Selenium não dá nenhum erro, mas o menu nunca
-    chega a abrir de verdade, porque o evento certo nunca foi disparado.
-
-    ActionChains simula o mouse "de verdade" (move até o elemento, pressiona
-    o botão, solta o botão), então dispara toda a sequência de eventos que o
-    Google Maps espera.
+    Necessário porque o Google Maps escuta mousedown/pointerdown, não só
+    "click" — um clique via JS puro passa em branco sem dar erro nenhum.
     """
     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
     time.sleep(0.3)
     ActionChains(driver).move_to_element(element).pause(0.2).click().perform()
 
 
-# ---------------------------------------------------------------------------
-# Configuração e carregamento inicial da página
-# ---------------------------------------------------------------------------
+def get_available_directory(base_path, base_name):
+    """
+    Retorna um caminho de pasta livre: base_name, ou base_name1,
+    base_name2... se já existir. Evita sobrescrever/travar em cima de uma
+    pasta com arquivo já aberto de uma execução anterior.
+    """
+    dir_path = os.path.join(base_path, base_name)
+    if not os.path.exists(dir_path):
+        return dir_path
+
+    counter = 1
+    while True:
+        new_dir_path = os.path.join(base_path, f"{base_name}{counter}")
+        if not os.path.exists(new_dir_path):
+            return new_dir_path
+        counter += 1
+
+
+# =============================================================================
+# 2) ABRIR O NAVEGADOR
+# =============================================================================
 
 def configure_driver(headless=False):
-    """Cria e retorna uma instância configurada do Chrome WebDriver."""
+    """Cria o Chrome WebDriver."""
     options = Options()
     if headless:
         options.add_argument('--headless')
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
 
-def accept_cookie_consent(driver, debug=True):
-    """
-    Antes de exibir o Google Maps normalmente, o Google às vezes mostra uma
-    tela de consentimento de cookies ("Antes de continuar..." / "Aceitar
-    tudo"). Enquanto essa tela não é fechada, a página do mapa/avaliações
-    nunca termina de carregar de verdade.
+# =============================================================================
+# 3) FECHAR TELA DE COOKIES (chamada de dentro de load_reviews_page)
+# =============================================================================
 
-    Essa função tenta localizar e clicar no botão de aceite. Se não
-    encontrar nada, assume que a tela não apareceu dessa vez (o Google nem
-    sempre mostra isso) e segue em frente normalmente.
-    """
+def accept_cookie_consent(driver, debug=True):
+    """Fecha o aviso de cookies do Google, se ele aparecer. Se não aparecer, segue normal."""
     accept_selectors = [
         (By.XPATH, "//button[.//span[contains(text(),'Aceitar tudo')]]"),
         (By.XPATH, "//button[contains(., 'Aceitar tudo')]"),
         (By.XPATH, "//button[contains(., 'Accept all')]"),
         (By.XPATH, "//button[contains(@aria-label, 'Aceitar')]"),
         (By.XPATH, "//button[contains(@aria-label, 'Accept')]"),
-        (By.XPATH, "//form//button[2]"),  # fallback: geralmente o 2º botão do form de consentimento é "aceitar"
+        (By.XPATH, "//form//button[2]"),  # fallback: 2º botão do form costuma ser "aceitar"
     ]
 
     short_wait = WebDriverWait(driver, 5)
@@ -93,34 +97,31 @@ def accept_cookie_consent(driver, debug=True):
             button = short_wait.until(EC.element_to_be_clickable((by, selector)))
             _real_click(driver, button)
             if debug:
-                print(f"[DEBUG] Tela de consentimento de cookies detectada e fechada usando: {selector}")
+                print(f"[DEBUG] Cookies: fechado usando {selector}")
             time.sleep(1.5)
             return True
         except TimeoutException:
             continue
         except Exception as e:
             if debug:
-                print(f"[DEBUG] Erro ao tentar clicar em '{selector}': {e}")
+                print(f"[DEBUG] Cookies: erro em '{selector}': {e}")
             continue
 
     if debug:
-        print("[DEBUG] Nenhuma tela de consentimento de cookies detectada "
-              "(ou ela já não apareceu dessa vez) — seguindo normalmente.")
+        print("[DEBUG] Cookies: nenhuma tela de consentimento apareceu.")
     return False
 
 
+# =============================================================================
+# 4) ABRIR A PÁGINA E ESPERAR AS AVALIAÇÕES CARREGAREM
+# =============================================================================
+
 def load_reviews_page(driver, url, timeout=20):
     """
-    Abre a URL, fecha a tela de consentimento de cookies (se aparecer) e
-    espera o painel de avaliações carregar.
-
-    Retorna:
-        True  -> página carregada e pronta para o scraping.
-        False -> a página não carregou a tempo (um screenshot de erro é
-                 salvo automaticamente para facilitar o diagnóstico).
+    Abre a URL, fecha cookies e espera o painel de avaliações aparecer.
+    Retorna True se carregou a tempo; False (+ screenshot de erro) se não.
     """
     driver.get(url)
-
     accept_cookie_consent(driver)
 
     try:
@@ -133,34 +134,87 @@ def load_reviews_page(driver, url, timeout=20):
         screenshot_path = os.path.join(error_base_path, "erro_carregamento_avaliacoes.png")
         try:
             driver.save_screenshot(screenshot_path)
-            print("ERRO: a página não carregou as avaliações dentro do tempo esperado.")
-            print(f"Um screenshot da tela no momento da falha foi salvo em:\n  {screenshot_path}")
-            print("Abra essa imagem para ver o que está bloqueando o carregamento "
-                  "(ex: tela de consentimento, captcha, layout diferente do esperado).")
+            print("ERRO: avaliações não carregaram a tempo.")
+            print(f"Screenshot do erro salvo em: {screenshot_path}")
         except Exception as e:
-            print(f"Não consegui nem salvar o screenshot de erro: {e}")
+            print(f"Não consegui nem salvar o screenshot: {e}")
         return False
 
 
-# ---------------------------------------------------------------------------
-# Ordenação das avaliações
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 5) LER A DISTRIBUIÇÃO DE ESTRELAS (5★, 4★, ... no topo do painel)
+# =============================================================================
+
+def capture_star_distribution(driver, debug=True):
+    """Lê o histograma de estrelas do topo do painel. Retorna {5: n, 4: n, ...}."""
+    distribution = {5: 0, 4: 0, 3: 0, 2: 0, 1: 0}
+
+    try:
+        histogram_selectors = [
+            "//div[contains(@aria-label, 'estrela')]",
+            "//button[contains(@aria-label, 'estrela')]",
+            "//*[contains(@aria-label, 'star')]",  # fallback em inglês
+        ]
+
+        candidate_elements = []
+        for xpath in histogram_selectors:
+            candidate_elements.extend(driver.find_elements(By.XPATH, xpath))
+
+        # remove duplicados mantendo a ordem
+        seen = set()
+        unique_elements = []
+        for el in candidate_elements:
+            if el.id not in seen:
+                seen.add(el.id)
+                unique_elements.append(el)
+
+        if debug:
+            print(f"[DEBUG] Estrelas: {len(unique_elements)} elementos candidatos encontrados.")
+
+        for row in unique_elements:
+            aria_label = row.get_attribute('aria-label')
+            if not aria_label:
+                continue
+            if debug:
+                print(f"[DEBUG] Estrelas: aria-label {aria_label!r}")
+
+            aria_label_lower = aria_label.lower()
+            found_star = None
+            for n in range(5, 0, -1):
+                if f"{n} estrela" in aria_label_lower or f"{n} star" in aria_label_lower:
+                    found_star = n
+                    break
+            if found_star is None:
+                continue
+
+            numbers = [int(s) for s in aria_label_lower.replace(',', '').replace('.', '').split() if s.isdigit()]
+            if len(numbers) >= 2:
+                distribution[found_star] = numbers[1]
+            elif len(numbers) == 1 and numbers[0] != found_star:
+                distribution[found_star] = numbers[0]
+
+        if all(v == 0 for v in distribution.values()):
+            print("Distribuição de estrelas: não encontrada (veja os [DEBUG] acima).")
+        else:
+            print(f"Distribuição de estrelas capturada: {distribution}")
+
+    except Exception as e:
+        print(f"Erro ao capturar distribuição de estrelas: {e}")
+
+    return distribution
+
+
+# =============================================================================
+# 6) ORDENAR AS AVALIAÇÕES POR "MAIS RECENTES"
+# =============================================================================
 
 def sort_reviews_by_most_recent(driver, debug=True):
-    """
-    Ordena as avaliações do Google Maps por 'Mais recentes'.
-
-    Retorna:
-        True  -> ordenação realizada com sucesso.
-        False -> não foi possível alterar a ordenação.
-    """
+    """Clica no botão de ordenação e seleciona 'Mais recentes'. Retorna True/False."""
     wait = WebDriverWait(driver, 15)
 
     try:
         wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "div.m6QErb.DxyBCb.kA9KIf.dS8AEf")
-            )
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.m6QErb.DxyBCb.kA9KIf.dS8AEf"))
         )
     except TimeoutException:
         print("Painel de avaliações não carregou a tempo.")
@@ -181,20 +235,13 @@ def sort_reviews_by_most_recent(driver, debug=True):
         try:
             sort_button = wait.until(EC.element_to_be_clickable((by, selector)))
             if debug:
-                print(f"[DEBUG] Botão de ordenação encontrado usando: {selector}")
+                print(f"[DEBUG] Ordenação: botão encontrado com {selector}")
             break
         except TimeoutException:
             continue
 
     if sort_button is None:
-        print("Não foi possível localizar o botão de ordenação.")
-        if debug:
-            print("\n[DEBUG] Botões visíveis na página (para ajudar a achar o seletor certo):\n")
-            for b in driver.find_elements(By.TAG_NAME, "button"):
-                text = b.text.strip()
-                aria = b.get_attribute("aria-label")
-                if text or aria:
-                    print(f"  texto='{text}' | aria-label='{aria}'")
+        print("Não achei o botão de ordenação.")
         return False
 
     try:
@@ -204,14 +251,11 @@ def sort_reviews_by_most_recent(driver, debug=True):
         return False
 
     try:
-        wait.until(
-            EC.presence_of_element_located((By.XPATH, "//div[@role='menu' or @role='listbox']"))
-        )
+        wait.until(EC.presence_of_element_located((By.XPATH, "//div[@role='menu' or @role='listbox']")))
         time.sleep(0.5)
     except TimeoutException:
         if debug:
-            print("[DEBUG] O menu de ordenação não parece ter aberto (nenhum elemento com "
-                  "role='menu'/'listbox' apareceu). O clique pode não ter surtido efeito.")
+            print("[DEBUG] Ordenação: o menu não parece ter aberto.")
 
     most_recent_option_selectors = [
         (By.XPATH, "//div[@role='menuitemradio'][contains(.,'Mais recentes')]"),
@@ -227,144 +271,46 @@ def sort_reviews_by_most_recent(driver, debug=True):
         try:
             most_recent_option = wait.until(EC.element_to_be_clickable((by, selector)))
             if debug:
-                print(f"[DEBUG] Opção 'Mais recentes' encontrada usando: {selector}")
+                print(f"[DEBUG] Ordenação: opção 'Mais recentes' encontrada com {selector}")
             break
         except TimeoutException:
             continue
 
     if most_recent_option is None:
-        if debug:
-            menu_items = driver.find_elements(By.XPATH, "//*[@role='menuitemradio' or @role='menuitem']")
-            print(f"[DEBUG] Não encontrei a opção 'Mais recentes'. Itens de menu visíveis ({len(menu_items)}):")
-            for item in menu_items:
-                print(f"  - texto: {item.text!r}")
-        print("Não foi possível encontrar a opção 'Mais recentes'.")
+        print("Não achei a opção 'Mais recentes'.")
         return False
 
     try:
         _real_click(driver, most_recent_option)
         time.sleep(2)
     except Exception as e:
-        print(f"Erro ao clicar na opção 'Mais recentes': {e}")
+        print(f"Erro ao clicar em 'Mais recentes': {e}")
         return False
 
-    # Verificação extra: confirma que a ordenação realmente mudou, conferindo
-    # se o texto do botão de ordenação mudou de "Mais relevantes" para
-    # "Mais recentes" (evita confiar num clique que pode não ter surtido efeito)
+    # confere se o texto do botão realmente mudou (evita clique "fantasma")
     try:
         time.sleep(1)
-        updated_button_text = sort_button.text.strip() if sort_button.text else (sort_button.get_attribute("aria-label") or "")
-        if debug:
-            print(f"[DEBUG] Texto do botão de ordenação após o clique: '{updated_button_text}'")
-        if "recentes" in updated_button_text.lower() or "recent" in updated_button_text.lower():
+        updated_text = sort_button.text.strip() if sort_button.text else (sort_button.get_attribute("aria-label") or "")
+        if "recentes" in updated_text.lower() or "recent" in updated_text.lower():
             print("Confirmado: avaliações ordenadas por 'Mais recentes'.")
         else:
-            print("Aviso: cliquei na opção, mas não consegui confirmar pelo texto do botão. "
-                  "Verifique visualmente se a ordenação mudou.")
+            print("Aviso: cliquei, mas não confirmei pelo texto do botão.")
     except Exception:
         pass
 
     return True
 
 
-# ---------------------------------------------------------------------------
-# Distribuição de votos por estrela
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 7) ROLAR A LISTA E CONTAR QUANTAS AVALIAÇÕES CARREGARAM
+# =============================================================================
 
-def capture_star_distribution(driver, debug=True):
+def load_reviews(driver, max_reviews=None):
     """
-    Captura, no cabeçalho do painel de avaliações, o número de votos para
-    cada nota (5, 4, 3, 2 e 1 estrelas).
-
-    Retorna um dicionário no formato:
-        {5: 120, 4: 30, 3: 10, 2: 5, 1: 8}
-
-    Se `debug=True`, imprime no console todos os aria-labels candidatos
-    encontrados na página — útil se a extração continuar zerada, pois mostra
-    exatamente o texto que precisa ser interpretado.
+    Rola até o fim (ou até max_reviews) e retorna a CONTAGEM de avaliações
+    carregadas — não os elementos em si, pois eles ficam "obsoletos" quando
+    clicamos no "Mais" depois (ver extract_review_data).
     """
-    distribution = {5: 0, 4: 0, 3: 0, 2: 0, 1: 0}
-
-    try:
-        histogram_selectors = [
-            "//div[contains(@aria-label, 'estrela')]",
-            "//button[contains(@aria-label, 'estrela')]",
-            "//*[contains(@aria-label, 'star')]",  # fallback em inglês
-            "//div[contains(@aria-label,'5') and contains(@aria-label,'estrela')]",
-        ]
-
-        candidate_elements = []
-        for xpath in histogram_selectors:
-            candidate_elements.extend(driver.find_elements(By.XPATH, xpath))
-
-        # remove duplicados mantendo a ordem
-        seen = set()
-        unique_elements = []
-        for el in candidate_elements:
-            if el.id not in seen:
-                seen.add(el.id)
-                unique_elements.append(el)
-
-        if debug:
-            print(f"[DEBUG] {len(unique_elements)} elementos candidatos ao histograma de estrelas encontrados.")
-
-        for row in unique_elements:
-            aria_label = row.get_attribute('aria-label')
-            if not aria_label:
-                continue
-
-            if debug:
-                print(f"[DEBUG] aria-label candidato: {aria_label!r}")
-
-            aria_label_lower = aria_label.lower()
-
-            found_star = None
-            for n in range(5, 0, -1):
-                if f"{n} estrela" in aria_label_lower or f"{n} star" in aria_label_lower:
-                    found_star = n
-                    break
-
-            if found_star is None:
-                continue
-
-            numbers = [int(s) for s in aria_label_lower.replace(',', '').replace('.', '').split() if s.isdigit()]
-            if len(numbers) >= 2:
-                distribution[found_star] = numbers[1]
-            elif len(numbers) == 1 and numbers[0] != found_star:
-                distribution[found_star] = numbers[0]
-
-        if all(v == 0 for v in distribution.values()):
-            print("Não foi possível localizar a distribuição de estrelas na página "
-                  "(veja os aria-labels de [DEBUG] acima para ajustar o seletor).")
-        else:
-            print(f"Distribuição de estrelas capturada: {distribution}")
-
-    except Exception as e:
-        print(f"Erro ao capturar distribuição de estrelas: {e}")
-
-    return distribution
-
-
-# ---------------------------------------------------------------------------
-# Carregamento (scroll) e extração das avaliações
-# ---------------------------------------------------------------------------
-
-def load_reviews(driver):
-    """
-    Rola a lista de avaliações até o fim (sem limite fixo).
-
-    Retorna o NÚMERO de avaliações carregadas — não os WebElements em si.
-
-    Isso é proposital: manter referências de WebElement coletadas durante a
-    rolagem é arriscado, porque um clique feito DEPOIS (para expandir o
-    texto, em `extract_review_data`) pode fazer o Google Maps re-renderizar
-    o card por dentro, invalidando ("stale element") qualquer referência
-    obtida antes. Por isso aqui só contamos quantas avaliações existem; a
-    extração de cada uma sempre re-localiza o elemento pelo índice, com uma
-    referência fresca, direto na hora de usar.
-    """
-    seen_texts = set()
-
     try:
         scrollable_div = driver.find_element(By.CSS_SELECTOR, 'div.m6QErb.DxyBCb.kA9KIf.dS8AEf')
         last_height = driver.execute_script("return arguments[0].scrollHeight;", scrollable_div)
@@ -373,6 +319,12 @@ def load_reviews(driver):
         attempts_without_change = 0
 
         while True:
+            if max_reviews is not None:
+                current_count = len(driver.find_elements(By.CLASS_NAME, 'jftiEf'))
+                if current_count >= max_reviews:
+                    print(f"Limite de {max_reviews} avaliações atingido.")
+                    break
+
             driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scrollable_div)
             time.sleep(2)
             new_height = driver.execute_script("return arguments[0].scrollHeight;", scrollable_div)
@@ -385,41 +337,34 @@ def load_reviews(driver):
                 attempts_without_change = 0
                 last_height = new_height
 
-            current_reviews = driver.find_elements(By.CLASS_NAME, 'jftiEf')
-            for review in current_reviews:
-                review_text = review.text.strip()
-                if review_text:
-                    seen_texts.add(review_text)
-
-            if len(seen_texts) % 50 == 0 and len(seen_texts) > 0:
-                print(f"{len(seen_texts)} avaliações carregadas até agora...")
+            current_count = len(driver.find_elements(By.CLASS_NAME, 'jftiEf'))
+            if current_count % 50 == 0 and current_count > 0:
+                print(f"{current_count} avaliações carregadas até agora...")
 
     except Exception as e:
-        print(f"Erro ao carregar avaliações: {e}")
+        print(f"Erro ao rolar avaliações: {e}")
 
     total = len(driver.find_elements(By.CLASS_NAME, 'jftiEf'))
-    print(f"Fim da lista de avaliações atingido. Total coletado: {total} avaliações.")
+    if max_reviews is not None:
+        total = min(total, max_reviews)
+
+    print(f"Fim da coleta. Total: {total} avaliações.")
     return total
 
 
+# =============================================================================
+# 8) EXTRAIR OS DADOS DE CADA AVALIAÇÃO (chamada uma vez por índice)
+# =============================================================================
+
 def extract_review_data(driver, index):
     """
-    Extrai os dados da avaliação que está na posição `index` da lista atual
-    de elementos <div class="jftiEf"> na página.
-
-    IMPORTANTE — por que recebe `driver` + `index` em vez de um WebElement
-    pronto: um clique no botão "Mais" pode fazer o Google Maps re-renderizar
-    o card por dentro (o texto expande, mas o elemento em si é substituído
-    no DOM). Isso invalida ("stale element reference") qualquer referência
-    de elemento obtida ANTES do clique — e como cada extração de campo abaixo
-    está dentro de um try/except, esse erro ficava silencioso e todos os
-    campos caíam em "não encontrado" de uma vez só.
-
-    A solução é re-localizar o elemento do zero (`get_review_element`)
-    sempre que for interagir com a página: antes de cada clique e de novo
-    depois de todos os cliques, antes de ler os campos.
+    Extrai nome, nota, data, comentário e resposta da empresa da avaliação
+    na posição `index`. Antes disso, expande todo texto truncado clicando
+    em qualquer botão "Mais" que exista.
     """
+
     def get_review_element():
+        """Re-busca o elemento pelo índice (nunca reusa referência antiga)."""
         elements = driver.find_elements(By.CLASS_NAME, 'jftiEf')
         return elements[index] if index < len(elements) else None
 
@@ -431,34 +376,27 @@ def extract_review_data(driver, index):
         'resposta_empresa': 'Resposta não encontrada',
     }
 
-    # ---- Expande todos os textos truncados (comentário e/ou resposta da
-    # empresa) ANTES de extrair qualquer campo ----
+    # ---- Expande todos os "Mais" (comentário e/ou resposta da empresa) ----
     #
-    # Uma mesma avaliação pode ter DOIS botões "Mais" independentes: um para
-    # expandir o comentário do cliente, e outro (dentro da div "wiI7pd")
-    # para expandir a resposta da empresa. Clicamos em todos, um de cada
-    # vez, re-localizando o card a cada clique (o clique anterior pode ter
-    # invalidado a lista de botões que tínhamos em mãos).
-    try:
+    # Não dá pra calcular "quantos botões existem" uma vez só: depois de
+    # clicado, o botão MUDA DE CLASSE e some do seletor. Por isso sempre
+    # pegamos só o PRIMEIRO botão restante e clicamos, repetindo até não
+    # sobrar nenhum — assim funciona com 0, 1 ou 2 botões, e não depende
+    # de índice fixo numa lista que encolhe a cada clique.
+    max_click_attempts = 5  # trava de segurança contra loop infinito
+    for _ in range(max_click_attempts):
         review = get_review_element()
-        num_more_buttons = len(review.find_elements(By.CSS_SELECTOR, '.w8nwRe.kyuRq')) if review else 0
+        if review is None:
+            break
+        remaining_buttons = review.find_elements(By.CSS_SELECTOR, '.w8nwRe.kyuRq')
+        if not remaining_buttons:
+            break
+        try:
+            _real_click(driver, remaining_buttons[0])
+        except Exception:
+            break
 
-        for button_index in range(num_more_buttons):
-            try:
-                review = get_review_element()  # referência sempre fresca
-                if review is None:
-                    break
-                current_buttons = review.find_elements(By.CSS_SELECTOR, '.w8nwRe.kyuRq')
-                if button_index < len(current_buttons):
-                    current_buttons[button_index].click()
-                    time.sleep(0.3)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ---- Re-localiza a avaliação DEPOIS de clicar, antes de ler os campos ----
-    # (o próprio clique pode ter substituído o elemento no DOM)
+    # ---- Re-busca a avaliação (o clique pode ter renderizado ela de novo) ----
     review = get_review_element()
     if review is None:
         return default_result
@@ -497,12 +435,12 @@ def extract_review_data(driver, index):
     }
 
 
-# ---------------------------------------------------------------------------
-# Geração dos arquivos de saída (PDF e Excel)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 9) GERAR O PDF
+# =============================================================================
 
 def generate_pdf(reviews_data, star_distribution, pdf_path):
-    """Gera o arquivo PDF com todas as avaliações e a distribuição de estrelas."""
+    """Escreve todas as avaliações + a distribuição de estrelas num PDF."""
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -516,7 +454,6 @@ def generate_pdf(reviews_data, star_distribution, pdf_path):
         pdf.multi_cell(200, 10, txt=safe_text(f"Resposta da empresa: {data['resposta_empresa']}"), align='L')
         pdf.cell(200, 10, txt=safe_text('-' * 40), ln=True, align='L')
 
-    # Página extra com a distribuição de avaliações por estrela
     pdf.add_page()
     pdf.set_font("Arial", size=14)
     pdf.cell(200, 10, txt=safe_text("Distribuição de avaliações por estrela"), ln=True, align='L')
@@ -528,21 +465,19 @@ def generate_pdf(reviews_data, star_distribution, pdf_path):
     print(f"PDF salvo com sucesso em: {pdf_path}")
 
 
+# =============================================================================
+# 10) GERAR O EXCEL
+# =============================================================================
+
 def generate_excel(reviews_data, star_distribution, excel_path):
-    """Gera o arquivo Excel com uma aba de avaliações e outra de distribuição por estrela."""
+    """Escreve uma aba de avaliações + uma aba de distribuição por estrela num Excel."""
     wb = Workbook()
 
     ws = wb.active
     ws.title = "Avaliações"
     ws.append(["Nome", "Nota", "Data", "Comentário", "Resposta da Empresa"])
     for data in reviews_data:
-        ws.append([
-            data['nome'],
-            data['nota'],
-            data['data'],
-            data['comentario'],
-            data['resposta_empresa'],
-        ])
+        ws.append([data['nome'], data['nota'], data['data'], data['comentario'], data['resposta_empresa']])
 
     ws_distribution = wb.create_sheet(title="Distribuição por Estrela")
     ws_distribution.append(["Estrelas", "Quantidade de Avaliações"])
@@ -553,9 +488,9 @@ def generate_excel(reviews_data, star_distribution, excel_path):
     print(f"Excel salvo com sucesso em: {excel_path}")
 
 
-# ---------------------------------------------------------------------------
-# Orquestração principal
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 11) ORQUESTRAÇÃO — chama tudo acima, na ordem
+# =============================================================================
 
 def main():
     start_time = time.time()
@@ -563,35 +498,30 @@ def main():
     driver = configure_driver(headless=False)
 
     try:
-        page_loaded = load_reviews_page(driver, REVIEWS_URL)
-        if not page_loaded:
-            return  # o erro e o screenshot já foram reportados dentro da função
+        if not load_reviews_page(driver, REVIEWS_URL):
+            return  # erro e screenshot já reportados dentro da função
 
         star_distribution = capture_star_distribution(driver)
 
-        sort_success = sort_reviews_by_most_recent(driver)
-        if not sort_success:
-            print("ATENÇÃO: a ordenação por 'Mais recentes' falhou. "
-                  "As avaliações serão coletadas na ordem padrão do Google (Mais relevantes).")
+        if not sort_reviews_by_most_recent(driver):
+            print("ATENÇÃO: ordenação falhou — coletando na ordem padrão (Mais relevantes).")
 
-        review_count = load_reviews(driver)
+        review_count = load_reviews(driver, max_reviews=MAX_REVIEWS)
         reviews_data = [extract_review_data(driver, i) for i in range(review_count)]
 
-        # Pasta "avaliacoes" dentro do diretório do próprio programa
+        # pasta "avaliacoes" (ou avaliacoes1, avaliacoes2... se já existir)
         base_path = os.path.dirname(os.path.abspath(__file__))
-        documents_path = os.path.join(base_path, "avaliacoes")
+        documents_path = get_available_directory(base_path, "avaliacoes")
         os.makedirs(documents_path, exist_ok=True)
 
         generate_pdf(reviews_data, star_distribution, os.path.join(documents_path, "avaliacoes.pdf"))
         generate_excel(reviews_data, star_distribution, os.path.join(documents_path, "avaliacoes.xlsx"))
 
     finally:
-        # O navegador é fechado mesmo se algo der errado no meio do caminho
         driver.quit()
 
-    end_time = time.time()
-    minutes, seconds = divmod(end_time - start_time, 60)
-    print(f"Tempo de execução do script: {int(minutes)} minutos e {seconds:.2f} segundos")
+    minutes, seconds = divmod(time.time() - start_time, 60)
+    print(f"Tempo de execução: {int(minutes)} min e {seconds:.2f} s")
 
 
 if __name__ == "__main__":
