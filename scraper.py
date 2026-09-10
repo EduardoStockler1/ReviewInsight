@@ -10,20 +10,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-from openpyxl import Workbook
-
-
-# Limite de avaliações a coletar (None = sem limite, coleta tudo)
-MAX_REVIEWS = 5
-
-# URL da página de avaliações a raspar
-REVIEWS_URL = (
-    'https://www.google.com/maps/place/Hospital+Erastinho/'
-    '@-25.452814,-49.2411939,1074m/data=!3m1!1e3!4m8!3m7!1s0x94dce5124cb3e99b:'
-    '0xdb43625e49c502d9!8m2!3d-25.4528189!4d-49.238619!9m1!1b1!16s%2Fg%2F11h5mp07v2'
-    '?entry=ttu&g_ep=EgoyMDI2MDYyOC4wIKXMDSoASAFQAw%3D%3D'
-)
-
 
 # =============================================================================
 # 1) UTILITÁRIOS GERAIS (usados por várias etapas abaixo)
@@ -35,41 +21,22 @@ def safe_text(text):
 
 
 def _real_click(driver, element):
-    """
-    Clique "de verdade" (rola até o elemento + simula mouse com ActionChains).
 
-    Necessário porque o Google Maps escuta mousedown/pointerdown, não só
-    "click" — um clique via JS puro passa em branco sem dar erro nenhum.
-    """
+    # Clique "de verdade" (rola até o elemento + simula mouse com ActionChains).
+
+    # Necessário porque o Google Maps escuta mousedown/pointerdown, não só
+    # "click" — um clique via JS puro passa em branco sem dar erro nenhum.
+    
     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
     time.sleep(0.3)
     ActionChains(driver).move_to_element(element).pause(0.2).click().perform()
-
-
-def get_available_directory(base_path, base_name):
-    """
-    Retorna um caminho de pasta livre: base_name, ou base_name1,
-    base_name2... se já existir. Evita sobrescrever/travar em cima de uma
-    pasta com arquivo já aberto de uma execução anterior.
-    """
-    dir_path = os.path.join(base_path, base_name)
-    if not os.path.exists(dir_path):
-        return dir_path
-
-    counter = 1
-    while True:
-        new_dir_path = os.path.join(base_path, f"{base_name}{counter}")
-        if not os.path.exists(new_dir_path):
-            return new_dir_path
-        counter += 1
-
 
 # =============================================================================
 # 2) ABRIR O NAVEGADOR
 # =============================================================================
 
 def configure_driver(headless=False):
-    """Cria o Chrome WebDriver."""
+    # Cria o Chrome WebDriver.
     options = Options()
     if headless:
         options.add_argument('--headless')
@@ -81,7 +48,7 @@ def configure_driver(headless=False):
 # =============================================================================
 
 def accept_cookie_consent(driver, debug=True):
-    """Fecha o aviso de cookies do Google, se ele aparecer. Se não aparecer, segue normal."""
+    # Fecha o aviso de cookies do Google, se ele aparecer. Se não aparecer, segue normal.
     accept_selectors = [
         (By.XPATH, "//button[.//span[contains(text(),'Aceitar tudo')]]"),
         (By.XPATH, "//button[contains(., 'Aceitar tudo')]"),
@@ -117,10 +84,10 @@ def accept_cookie_consent(driver, debug=True):
 # =============================================================================
 
 def load_reviews_page(driver, url, timeout=20):
-    """
-    Abre a URL, fecha cookies e espera o painel de avaliações aparecer.
-    Retorna True se carregou a tempo; False (+ screenshot de erro) se não.
-    """
+    
+    # Abre a URL, fecha cookies e espera o painel de avaliações aparecer.
+    # Retorna True se carregou a tempo; False (+ screenshot de erro) se não.
+    
     driver.get(url)
     accept_cookie_consent(driver)
 
@@ -146,7 +113,7 @@ def load_reviews_page(driver, url, timeout=20):
 # =============================================================================
 
 def capture_star_distribution(driver, debug=True):
-    """Lê o histograma de estrelas do topo do painel. Retorna {5: n, 4: n, ...}."""
+    # Lê o histograma de estrelas do topo do painel. Retorna {5: n, 4: n, ...}.
     distribution = {5: 0, 4: 0, 3: 0, 2: 0, 1: 0}
 
     try:
@@ -209,7 +176,7 @@ def capture_star_distribution(driver, debug=True):
 # =============================================================================
 
 def sort_reviews_by_most_recent(driver, debug=True):
-    """Clica no botão de ordenação e seleciona 'Mais recentes'. Retorna True/False."""
+    # Clica no botão de ordenação e seleciona 'Mais recentes'. Retorna True/False.
     wait = WebDriverWait(driver, 15)
 
     try:
@@ -306,11 +273,11 @@ def sort_reviews_by_most_recent(driver, debug=True):
 # =============================================================================
 
 def load_reviews(driver, max_reviews=None):
-    """
-    Rola até o fim (ou até max_reviews) e retorna a CONTAGEM de avaliações
-    carregadas — não os elementos em si, pois eles ficam "obsoletos" quando
-    clicamos no "Mais" depois (ver extract_review_data).
-    """
+    
+    # Rola até o fim (ou até max_reviews) e retorna a CONTAGEM de avaliações
+    # carregadas — não os elementos em si, pois eles ficam "obsoletos" quando
+    # clicamos no "Mais" depois (ver extract_review_data).
+    
     try:
         scrollable_div = driver.find_element(By.CSS_SELECTOR, 'div.m6QErb.DxyBCb.kA9KIf.dS8AEf')
         last_height = driver.execute_script("return arguments[0].scrollHeight;", scrollable_div)
@@ -357,14 +324,14 @@ def load_reviews(driver, max_reviews=None):
 # =============================================================================
 
 def extract_review_data(driver, index):
-    """
-    Extrai nome, nota, data, comentário e resposta da empresa da avaliação
-    na posição `index`. Antes disso, expande todo texto truncado clicando
-    em qualquer botão "Mais" que exista.
-    """
+    
+    # Extrai nome, nota, data, comentário e resposta da empresa da avaliação
+    # na posição `index`. Antes disso, expande todo texto truncado clicando
+    # em qualquer botão "Mais" que exista.
+    
 
     def get_review_element():
-        """Re-busca o elemento pelo índice (nunca reusa referência antiga)."""
+        # Re-busca o elemento pelo índice (nunca reusa referência antiga).
         elements = driver.find_elements(By.CLASS_NAME, 'jftiEf')
         return elements[index] if index < len(elements) else None
 
@@ -388,13 +355,16 @@ def extract_review_data(driver, index):
         review = get_review_element()
         if review is None:
             break
+        # Procura dentro da avaliação elementos cujo a classe é w8nwRe ou kyuRq, que são as classes que correspodem ao botão "mais"
         remaining_buttons = review.find_elements(By.CSS_SELECTOR, '.w8nwRe.kyuRq')
         if not remaining_buttons:
             break
         try:
-            _real_click(driver, remaining_buttons[0])
+            _real_click(driver, remaining_buttons[0]) #clica no "mais"
         except Exception:
             break
+
+    #AAAAAAAAAAAAA FINALMENTE
 
     # ---- Re-busca a avaliação (o clique pode ter renderizado ela de novo) ----
     review = get_review_element()
@@ -435,94 +405,3 @@ def extract_review_data(driver, index):
     }
 
 
-# =============================================================================
-# 9) GERAR O PDF
-# =============================================================================
-
-def generate_pdf(reviews_data, star_distribution, pdf_path):
-    """Escreve todas as avaliações + a distribuição de estrelas num PDF."""
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-
-    for data in reviews_data:
-        pdf.cell(200, 10, txt=safe_text(f"Nome: {data['nome']}"), ln=True, align='L')
-        pdf.cell(200, 10, txt=safe_text(f"Nota: {data['nota']}"), ln=True, align='L')
-        pdf.cell(200, 10, txt=safe_text(f"Data: {data['data']}"), ln=True, align='L')
-        pdf.multi_cell(200, 10, txt=safe_text(f"Comentário: {data['comentario']}"), align='L')
-        pdf.multi_cell(200, 10, txt=safe_text(f"Resposta da empresa: {data['resposta_empresa']}"), align='L')
-        pdf.cell(200, 10, txt=safe_text('-' * 40), ln=True, align='L')
-
-    pdf.add_page()
-    pdf.set_font("Arial", size=14)
-    pdf.cell(200, 10, txt=safe_text("Distribuição de avaliações por estrela"), ln=True, align='L')
-    pdf.set_font("Arial", size=12)
-    for star in sorted(star_distribution.keys(), reverse=True):
-        pdf.cell(200, 10, txt=safe_text(f"{star} estrelas: {star_distribution[star]} avaliações"), ln=True, align='L')
-
-    pdf.output(pdf_path)
-    print(f"PDF salvo com sucesso em: {pdf_path}")
-
-
-# =============================================================================
-# 10) GERAR O EXCEL
-# =============================================================================
-
-def generate_excel(reviews_data, star_distribution, excel_path):
-    """Escreve uma aba de avaliações + uma aba de distribuição por estrela num Excel."""
-    wb = Workbook()
-
-    ws = wb.active
-    ws.title = "Avaliações"
-    ws.append(["Nome", "Nota", "Data", "Comentário", "Resposta da Empresa"])
-    for data in reviews_data:
-        ws.append([data['nome'], data['nota'], data['data'], data['comentario'], data['resposta_empresa']])
-
-    ws_distribution = wb.create_sheet(title="Distribuição por Estrela")
-    ws_distribution.append(["Estrelas", "Quantidade de Avaliações"])
-    for star in sorted(star_distribution.keys(), reverse=True):
-        ws_distribution.append([star, star_distribution[star]])
-
-    wb.save(excel_path)
-    print(f"Excel salvo com sucesso em: {excel_path}")
-
-
-# =============================================================================
-# 11) ORQUESTRAÇÃO — chama tudo acima, na ordem
-# =============================================================================
-
-def main():
-    start_time = time.time()
-
-    driver = configure_driver(headless=False)
-
-    try:
-        if not load_reviews_page(driver, REVIEWS_URL):
-            return  # erro e screenshot já reportados dentro da função
-
-        star_distribution = capture_star_distribution(driver)
-
-        if not sort_reviews_by_most_recent(driver):
-            print("ATENÇÃO: ordenação falhou — coletando na ordem padrão (Mais relevantes).")
-
-        review_count = load_reviews(driver, max_reviews=MAX_REVIEWS)
-        reviews_data = [extract_review_data(driver, i) for i in range(review_count)]
-
-        # pasta "avaliacoes" (ou avaliacoes1, avaliacoes2... se já existir)
-        base_path = os.path.dirname(os.path.abspath(__file__))
-        documents_path = get_available_directory(base_path, "avaliacoes")
-        os.makedirs(documents_path, exist_ok=True)
-
-        generate_pdf(reviews_data, star_distribution, os.path.join(documents_path, "avaliacoes.pdf"))
-        generate_excel(reviews_data, star_distribution, os.path.join(documents_path, "avaliacoes.xlsx"))
-
-    finally:
-        driver.quit()
-
-    minutes, seconds = divmod(time.time() - start_time, 60)
-    print(f"Tempo de execução: {int(minutes)} min e {seconds:.2f} s")
-
-
-if __name__ == "__main__":
-    main()
